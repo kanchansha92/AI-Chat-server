@@ -1,0 +1,969 @@
+{
+  "info": {
+    "name": "Privateaile API",
+    "description": "Every Privateaile endpoint, individually testable.\n\nHOW TO USE\n1. Start the backend (npm run dev) - it runs on http://localhost:5000.\n2. Run '1. Health check' to confirm the server is up.\n3. Run 'Auth > Register' (or 'Login' if the account exists) - the token is saved automatically to the collection variable {{token}}. Every protected request uses it by itself after that.\n4. Run the rest in any order. 'Characters > Create (quick, JSON)' saves {{characterId}} for the get/patch/delete requests.\n\nERROR-CASE requests are included so you can see the privateaile-voice 400/401/404 replies.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:5000"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "characterId",
+      "value": ""
+    },
+    {
+      "key": "test_email",
+      "value": "kane.test@example.com"
+    },
+    {
+      "key": "test_password",
+      "value": "quiet-paper-lamp-42"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health check",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('200 ok', () => pm.response.to.have.status(200));",
+              "pm.test('says privateaile', () => pm.expect(pm.response.json().product).to.eql('privateaile'));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "health"
+          ]
+        },
+        "description": "No auth. Expect 200 { status: 'ok', product: 'privateaile' }."
+      }
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 created (or 409 if account already exists - then use Login)', () => {",
+                  "  pm.expect([201, 409]).to.include(pm.response.code);",
+                  "});",
+                  "const j = pm.response.json();",
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('token', j.token);",
+                  "  pm.test('token + user returned, no passwordHash', () => {",
+                  "    pm.expect(j.token).to.be.a('string');",
+                  "    pm.expect(j.user).to.not.have.property('passwordHash');",
+                  "  });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Kane\",\n  \"email\": \"{{test_email}}\",\n  \"password\": \"{{test_password}}\",\n  \"dob\": \"1995-04-12\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/register",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Expect 201 { token, user }. Token is auto-saved to {{token}}.\nRun once - a second run returns 409 (email taken); switch to Login after that."
+          }
+        },
+        {
+          "name": "Register - underage (error case)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('age-gate copy', () => pm.expect(pm.response.json().error.fields.dob).to.include('18 only'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Kid\",\n  \"email\": \"kid@example.com\",\n  \"password\": \"long-enough-pass-1\",\n  \"dob\": \"2015-01-01\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/register",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Expect 400 with fields.dob = 'privateaile is 18 only. - try again in a few years.'"
+          }
+        },
+        {
+          "name": "Register - bad email + short password (error case)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "const f = pm.response.json().error.fields;",
+                  "pm.test('email + password field errors', () => { pm.expect(f).to.have.property('email'); pm.expect(f).to.have.property('password'); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Kane\",\n  \"email\": \"not-an-email\",\n  \"password\": \"short\",\n  \"dob\": \"1995-04-12\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/register",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Expect 400: '- that doesn't look like an email yet.' + '- password needs at least 10 characters.'"
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ok', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.collectionVariables.set('token', j.token);",
+                  "pm.test('token saved', () => pm.expect(j.token).to.be.a('string'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{test_email}}\",\n  \"password\": \"{{test_password}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Expect 200 { token, user }. Token auto-saved to {{token}}."
+          }
+        },
+        {
+          "name": "Login - wrong password (error case)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));",
+                  "pm.test('no-match copy', () => pm.expect(pm.response.json().error.message).to.include(\"don't match\"));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{test_email}}\",\n  \"password\": \"definitely-wrong-pass\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Expect 401. Note: 5 wrong tries in a row locks the account for 5 minutes (429)."
+          }
+        },
+        {
+          "name": "Me (current user)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ok', () => pm.response.to.have.status(200));",
+                  "pm.test('user has no passwordHash', () => pm.expect(pm.response.json().user).to.not.have.property('passwordHash'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/auth/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "me"
+              ]
+            },
+            "description": "Expect 200 { user } - includes plan, theme, onboardingDone, intent."
+          }
+        },
+        {
+          "name": "Me - no token (error case)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/auth/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "me"
+              ]
+            },
+            "description": "Expect 401 '- sign in to continue.'"
+          }
+        },
+        {
+          "name": "Logout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ok', () => pm.response.to.have.status(200));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/auth/logout",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "Expect 200 '- signed out. come back any time.' (JWT is stateless - the token still works until it expires; the client is expected to discard it.)"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "Complete onboarding",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ok', () => pm.response.to.have.status(200));",
+                  "const u = pm.response.json().user;",
+                  "pm.test('normalized + done', () => {",
+                  "  pm.expect(u.theme).to.eql('LAMPLIGHT');",
+                  "  pm.expect(u.intent).to.eql('ROLEPLAY');",
+                  "  pm.expect(u.onboardingDone).to.eql(true);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"theme\": \"lamplight\",\n  \"intent\": \"roleplay\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/users/me/onboarding",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me",
+                "onboarding"
+              ]
+            },
+            "description": "theme: paper | lamplight · intent: company | roleplay | journal | looking (case-insensitive).\nExpect 200 { user } with THEME/INTENT uppercased and onboardingDone: true."
+          }
+        },
+        {
+          "name": "Complete onboarding - bad intent (error case)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('fields.intent present', () => pm.expect(pm.response.json().error.fields).to.have.property('intent'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"theme\": \"paper\",\n  \"intent\": \"world-domination\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/users/me/onboarding",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me",
+                "onboarding"
+              ]
+            },
+            "description": "Expect 400 \"- that choice doesn't look right.\""
+          }
+        }
+      ]
+    },
+    {
+      "name": "Characters",
+      "item": [
+        {
+          "name": "Create (quick, JSON)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 created', () => pm.response.to.have.status(201));",
+                  "const c = pm.response.json().character;",
+                  "pm.collectionVariables.set('characterId', c.id);",
+                  "pm.test('shape ok', () => {",
+                  "  pm.expect(c.mode).to.eql('QUICK');",
+                  "  pm.expect(c.tones).to.eql(['warm', 'dry']);",
+                  "  pm.expect(c.sources).to.eql([]);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Devika\",\n  \"colour\": \"#c96e55\",\n  \"quickLine\": \"early thirties, painter, lives above the bakery, dry sense of humour.\",\n  \"tones\": [\"warm\", \"dry\"],\n  \"mode\": \"quick\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/characters",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "characters"
+              ]
+            },
+            "description": "The Quick builder path. Expect 201 { character }. The id is auto-saved to {{characterId}} for the get/patch/delete requests below.\n\ncolour: any #rrggbb (the app uses clay #c96e55, sage #a8b08c, rust #b5563f, olive #8a8a70, slate #7d95a3)\ntones: warm dry playful quiet curious sharp\nname: 1–40 chars · quickLine: up to 500 chars"
+          }
+        },
+        {
+          "name": "Create (deep, multipart + files)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 created', () => pm.response.to.have.status(201));",
+                  "const c = pm.response.json().character;",
+                  "pm.test('DEEP mode, sources listed, no storedPath leaked', () => {",
+                  "  pm.expect(c.mode).to.eql('DEEP');",
+                  "  if (c.sources.length) pm.expect(c.sources[0]).to.not.have.property('storedPath');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "name",
+                  "value": "Aria",
+                  "type": "text"
+                },
+                {
+                  "key": "colour",
+                  "value": "#7d95a3",
+                  "type": "text"
+                },
+                {
+                  "key": "quickLine",
+                  "value": "late-twenties, a bit guarded, takes the late local home.",
+                  "type": "text"
+                },
+                {
+                  "key": "tones",
+                  "value": "[\"quiet\", \"sharp\"]",
+                  "type": "text"
+                },
+                {
+                  "key": "mode",
+                  "value": "deep",
+                  "type": "text"
+                },
+                {
+                  "key": "sources",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick 1–6 files: .txt .zip .png .pdf, max 10mb each"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/characters",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "characters"
+              ]
+            },
+            "description": "The Deep builder path - multipart/form-data.\n\n⚠ Postman can't ship files inside a collection: click the 'sources' row in Body → form-data and select a file from your disk (any .txt works). Add more 'sources' rows for multiple files (max 6, 10mb each).\ntones is a JSON string here because multipart flattens fields.\n\nExpect 201 with character.sources[] listing your files (name/size/type - never the server path). Files land in backend/uploads/sources/.\n\nError cases to try: pick a .exe → 400 '- .txt, .zip, .png, .pdf - those work.' · a file over 10mb → 400 '- that file is a bit much. under 10mb, please.'"
+          }
+        },
+        {
+          "name": "Create - no name (error case)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('name copy', () => pm.expect(pm.response.json().error.fields.name).to.include('name first'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"colour\": \"#c96e55\",\n  \"tones\": [\"warm\"],\n  \"mode\": \"quick\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/characters",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "characters"
+              ]
+            },
+            "description": "Expect 400 '- give them a name first'"
+          }
+        },
+        {
+          "name": "Create - bad tone + bad colour (error case)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "const f = pm.response.json().error.fields;",
+                  "pm.test('tones + colour field errors', () => { pm.expect(f).to.have.property('tones'); pm.expect(f).to.have.property('colour'); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Rohan\",\n  \"colour\": \"reddish\",\n  \"tones\": [\"sassy\"],\n  \"mode\": \"quick\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/characters",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "characters"
+              ]
+            },
+            "description": "Expect 400 with fields.tones and fields.colour."
+          }
+        },
+        {
+          "name": "List all",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ok', () => pm.response.to.have.status(200));",
+                  "pm.test('characters is an array', () => pm.expect(pm.response.json().characters).to.be.an('array'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/characters",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "characters"
+              ]
+            },
+            "description": "Expect 200 { characters: [...] } - only YOUR characters, most recently touched first."
+          }
+        },
+        {
+          "name": "List - search",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ok', () => pm.response.to.have.status(200));",
+                  "pm.test('every result matches', () => {",
+                  "  pm.response.json().characters.forEach(c => pm.expect(c.name.toLowerCase()).to.include('dev'));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/characters?search=dev",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "characters"
+              ],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "dev"
+                }
+              ]
+            },
+            "description": "Case-insensitive name search. Expect only 'Devika' (if you created her)."
+          }
+        },
+        {
+          "name": "Get one",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ok', () => pm.response.to.have.status(200));",
+                  "pm.test('right character', () => pm.expect(pm.response.json().character.id).to.eql(pm.collectionVariables.get('characterId')));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/characters/{{characterId}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "characters",
+                "{{characterId}}"
+              ]
+            },
+            "description": "Uses {{characterId}} saved by 'Create (quick, JSON)'. Expect 200 { character }."
+          }
+        },
+        {
+          "name": "Get one - unknown id (error case)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));",
+                  "pm.test('deleted copy', () => pm.expect(pm.response.json().error.message).to.include('deleted'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/characters/00000000-0000-0000-0000-000000000000",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "characters",
+                "00000000-0000-0000-0000-000000000000"
+              ]
+            },
+            "description": "Expect 404 '- this character was deleted.' (Same reply for a character that belongs to someone else - ownership never leaks.)"
+          }
+        },
+        {
+          "name": "Update (patch)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ok', () => pm.response.to.have.status(200));",
+                  "const c = pm.response.json().character;",
+                  "pm.test('fields updated', () => {",
+                  "  pm.expect(c.quickLine).to.eql('now a muralist. still dry.');",
+                  "  pm.expect(c.tones).to.eql(['playful', 'curious']);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quickLine\": \"now a muralist. still dry.\",\n  \"tones\": [\"playful\", \"curious\"]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/characters/{{characterId}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "characters",
+                "{{characterId}}"
+              ]
+            },
+            "description": "Partial update - send any of: name, colour, quickLine, tones. Expect 200 { character } with the changes."
+          }
+        },
+        {
+          "name": "Update - empty body (error case)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/characters/{{characterId}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "characters",
+                "{{characterId}}"
+              ]
+            },
+            "description": "Expect 400 '- nothing to change yet.'"
+          }
+        },
+        {
+          "name": "Delete",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ok', () => pm.response.to.have.status(200));",
+                  "pm.test('gone copy', () => pm.expect(pm.response.json().message).to.eql('- gone.'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/characters/{{characterId}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "characters",
+                "{{characterId}}"
+              ]
+            },
+            "description": "Expect 200 { message: '- gone.' }. Removes the character, its sources rows, and the stored files. Run 'Get one' after this to see the 404."
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "plans": [
+    {
+      "id": "FREE",
+      "name": "Free",
+      "kicker": "x",
+      "monthly": 0,
+      "annual": 0,
+      "features": [
+        {
+          "label": "a",
+          "mark": "dot"
+        }
+      ]
+    },
+    {
+      "id": "ULTRA",
+      "name": "Ultra",
+      "kicker": "y",
+      "monthly": 1,
+      "annual": 2,
+      "features": [
+        {
+          "label": "b",
+          "mark": "check"
+        }
+      ]
+    }
+  ]
+}

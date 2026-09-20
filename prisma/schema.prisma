@@ -1,0 +1,935 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Effective plan. BASIC/PLUS/ULTRA are the paid tiers (config/plans.js). The
+// old PRO tier was migrated to ULTRA (migration 20260915000100_plan_enum_v2).
+enum Plan {
+  FREE
+  BASIC
+  PLUS
+  ULTRA
+}
+
+// Where User.plan currently comes from. `plan` is a cache of the effective plan
+// that lib/billing/subscription.js#applyEffectivePlan keeps in step with the
+// Subscription row - it is never written anywhere else.
+enum PlanSource {
+  FREE
+  TRIAL
+  PAID
+  GRANT
+}
+
+enum Theme {
+  PAPER
+  LAMPLIGHT
+}
+
+model User {
+  id             String   @id @default(uuid())
+  name           String
+  // Application code (controllers/auth.js) lowercases this on every write
+  // and every read before querying - that's what actually fixes the
+  // case-sensitivity bug, since Postgres VARCHAR equality is
+  // case-sensitive by default and Prisma doesn't lowercase for you.
+  // Belt-and-suspenders option if you want the DB to enforce it too:
+  // swap this column to Postgres's `citext` type (via
+  // `@db.Citext` + the citext extension), which makes equality
+  // case-insensitive at the database level regardless of what the app
+  // layer does.
+  email          String   @unique
+  // Renamed from `password` -> `passwordHash`: the original name made it
+  // easy for a future engineer to misread this as a plaintext field (it
+  // never is - it's always the bcrypt hash). Purely a clarity fix, same
+  // column either way.
+  //
+  // Nullable since social sign-in (Google/Facebook): a user who signs in
+  // with a provider has no password of their own. Email/password users
+  // still always have a hash; the login controller refuses to authenticate
+  // any account whose passwordHash is null.
+  passwordHash   String?
+  // Nullable for the same reason - OAuth providers don't hand us a date of
+  // birth, so social-created accounts start without one (collect it later
+  // in onboarding if the 18+ gate needs to apply to them too).
+  dob            DateTime?
+  // ─── social sign-in ─────────────────────────────────────────────────────
+  // The provider's stable user id ("sub" for Google, the numeric id for
+  // Facebook), set the first time a user signs in with that provider and
+  // used to recognise them on return. Unique so one provider account maps
+  // to exactly one Privateaile user. Accounts are linked by verified email: a
+  // provider sign-in that matches an existing user's email attaches the id
+  // to that user instead of creating a duplicate.
+  googleId       String?  @unique
+  facebookId     String?  @unique
+  avatar         String?
+  plan           Plan     @default(FREE)
+  planSource     PlanSource @default(FREE)
+  // Set the first (and only) time a Basic trial is started. Never cleared -
+  // one trial per account, whatever happens to the subscription afterwards.
+  trialUsedAt    DateTime?
+  razorpayCustomerId String? @unique
+  theme          Theme    @default(PAPER)
+  onboardingDone Boolean  @default(false)
+  // "what brings you here?" - set once on onboarding, nullable until then
+  intent         Intent?
+  language       String   @default("en")
+  // ─── admin ──────────────────────────────────────────────────────────────────
+  // Authorization for the internal admin tool. This has to be a server-owned
+  // column: the previous gate compared the email claim in the caller's own JWT
+  // against ADMIN_EMAILS, and since nothing in the product verifies email
+  // addresses, any user could PATCH /api/users/me onto an allowlisted address,
+  // sign in again, and walk into the admin tool. A column can only be set from
+  // the database side - see scripts/grant-admin.js.
+  isAdmin        Boolean  @default(false)
+  // ─── session revocation ─────────────────────────────────────────────────────
+  // Stamped into every JWT as `tv` and compared on each request
+  // (middleware/authMiddleware.js). Bumping it invalidates every token issued
+  // before the bump, which is what makes "change my password" actually end the
+  // other sessions - previously logout was a no-op, the token had no jti, and a
+  // stolen 30-day token could not be killed by any action the owner could take.
+  // Tokens minted before this column existed carry no `tv` and are read as 0,
+  // so they keep working until they expire.
+  tokenVersion   Int      @default(0)
+  // ─── legacy roleplay-trial columns ────────────────────────────────────────────
+  // Superseded by Subscription (status TRIALING). Nothing reads them any more -
+  // kept so the column drop can be its own, later migration.
+  roleplayTrialEndsAt     DateTime?
+  trialEndingNoticeSentAt DateTime?
+  // Set when a user schedules account deletion (brief §12.5); the sweep hard-
+  // deletes 30 days later. Cleared if they sign back in during the grace window.
+  deletionScheduledAt     DateTime?
+  characters     Character[]
+  journalThreads JournalThread[]
+  chatMessages   ChatMessage[]
+  groups         Group[]
+  groupMessages  GroupMessage[]
+  // §12.6 - reports this user has filed on a character's message.
+  messageReports MessageReport[]
+  // ─── billing / credits / usage ────────────────────────────────────────────────
+  subscription   Subscription?
+  payments       Payment[]
+  creditWallet   CreditWallet?
+  creditGrants   CreditGrant[]
+  creditTransactions CreditTransaction[]
+  usageCounters  UsageCounter[]
+  usageEvents    UsageEvent[]
+  personas       Persona[]
+  planChanges    PlanChange[]
+  userMemories   UserMemory[]
+  styleProfiles  StyleProfile[]
+  journalAttachments JournalAttachment[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+// ─── onboarding ────────────────────────────────────────────────────────────
+// "What brings you here?" - question 2 of 2 on the onboarding screen.
+enum Intent {
+  COMPANY
+  ROLEPLAY
+  JOURNAL
+  LOOKING
+}
+
+// ─── characters ────────────────────────────────────────────────────────────
+
+enum BuilderMode {
+  QUICK
+  DEEP
+}
+
+model Character {
+  id        String      @id @default(uuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  // avatar swatch hex - clay/sage/rust/olive/slate on the builder
+  colour    String      @default("#a8b08c")
+  // "add a photo" on the builder - the public URL of an uploaded profile
+  // picture. Null means they wear their colour instead (the initial-on-a-swatch
+  // dot every row falls back to). Files live in uploads/avatars and are served
+  // statically by server.js, the same directory the user's own avatar uses.
+  avatar    String?
+  // "a quick line about them" - the one-line bio from the quick builder
+  quickLine String      @default("")
+  // "how do they sound?" - warm/dry/playful/quiet/curious/sharp
+  tones     String[]    @default([])
+  mode      BuilderMode @default(QUICK)
+  // Plan "active characters" cap (config/plans.js activeCharacters). An
+  // inactive character keeps every message and memory but is read-only until
+  // re-activated - a downgrade never deletes anything.
+  isActive  Boolean     @default(true)
+  // Public sharing (Plus/Ultra). The public read endpoint exposes only the
+  // safe card (lib/serialize.js#publicCharacter): never memories, sources,
+  // messages or the owner's details.
+  isPublic  Boolean     @default(false)
+  publicSlug String?    @unique
+  sources   CharacterSource[]
+  // chat - the main surface (brief §6.9). A character owns the whole thread
+  // of messages the user has exchanged with them, plus the small set of facts
+  // they've picked up (the memory inspector, c.11).
+  messages  ChatMessage[]
+  memories  Memory[]
+  // §12.6 - reports filed against this character's messages.
+  reports   MessageReport[]
+  // group chat (brief §6.10) - a character can be a member of several rooms.
+  groupMemberships GroupMember[]
+  stories   Story[]
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  @@index([userId, updatedAt])
+  @@index([userId, isActive])
+}
+
+// A file uploaded on the deep builder ("give them a voice") - chat exports,
+// screenshots, text. We keep the original name/size/type for the UI and the
+// stored path for whenever the ingestion pipeline exists.
+model CharacterSource {
+  id          String    @id @default(uuid())
+  characterId String
+  character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  name        String
+  size        Int
+  type        String
+  storedPath  String
+  createdAt   DateTime  @default(now())
+}
+
+// ─── chat ────────────────────────────────────────────────────────────────────
+// "the heart of the product. Most user time happens here." (brief §6.9). Each
+// row is one bubble in the thread - the user's on the right, the character's on
+// the left. Replies are generated locally for now (lib/chat.js), the same
+// deterministic stand-in shape the journal uses (lib/reflect.js); swap it for a
+// model later without touching this table.
+
+enum MessageSender {
+  USER
+  CHARACTER
+}
+
+model ChatMessage {
+  id          String        @id @default(uuid())
+  characterId String
+  character   Character     @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  // Denormalized owner id. A message is always reachable via its character's
+  // userId, but keeping it here lets the Free daily-limit count (brief §6.14,
+  // "General chat - 30 / day") be a single indexed count across every
+  // character the user talks to, without a join.
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sender      MessageSender
+  text        String
+  // in-chat image generation (brief §6.9, mockup 10 "Chat - with image
+  // generation"). A character reply can carry a generated picture: `imageUrl`
+  // is the image (a self-contained SVG data-URI from the local stand-in,
+  // lib/image.js; a hosted URL once an image provider is wired in) and
+  // `imageAlt` the soft caption shown beneath it. `text` still holds the spoken
+  // line. Both null on ordinary text messages, so existing rows are unaffected.
+  imageUrl    String?
+  imageAlt    String?
+  // Files the USER shared with this message (photos, pdf, text) - an array of
+  // { id, kind: "image"|"file", name, type, size, url } built by
+  // lib/attachments.js. Null on ordinary messages and on character replies.
+  attachments Json?
+  // c.8 - a character reply the output classifier stopped mid-thought. The row
+  // is kept (so history and "regenerate" work) but flagged, and the client
+  // renders the §12.2 pause instead of the text.
+  blocked     Boolean       @default(false)
+  // Which classifier reason stopped it (moderation.js: nsfw | illegal). Kept so
+  // re-opening the §12.2 pause from a blocked bubble later shows the real
+  // reason instead of guessing - the client used to hardcode "nsfw", which
+  // misreported every other block. Null on messages that were never blocked.
+  // ─── billing audit ────────────────────────────────────────────────────────────
+  // A reply generated as a premium reply and/or with a user-selected model.
+  // `creditCost` is what the ledger charged for it (0 when covered by the daily
+  // allowance), kept here so regenerate/refund paths and the admin usage view
+  // can reason about a message without joining the ledger.
+  isPremium   Boolean       @default(false)
+  modelId     String?
+  creditCost  Decimal?      @db.Decimal(10, 2)
+  // Which story this message belongs to (Plus/Ultra multiple stories). Null =
+  // the character's default thread, which is what every existing row is.
+  storyId     String?
+  story       Story?        @relation(fields: [storyId], references: [id], onDelete: SetNull)
+  // Which persona the user was speaking as (null = none / default).
+  personaId   String?
+  blockedReason String?
+  createdAt   DateTime      @default(now())
+
+  // §12.6 - reports filed on this message.
+  reports     MessageReport[]
+  // c.11 - facts this message taught, so an edit or a delete can retract them.
+  taughtFacts Memory[]
+
+  // newest-last within a character; also the shape the daily-limit count uses
+  @@index([characterId, createdAt])
+  @@index([userId, sender, createdAt])
+  @@index([storyId, createdAt])
+}
+
+// ─── reports (brief §12.6) ────────────────────────────────────────────────────
+// "Tell us what's off. - we read these. a real person does." A report the user
+// filed on a character's message, from the more-menu. `reportedText` snapshots
+// the message as it read at the time, so a reviewer can still see what was
+// reported after the user edits or deletes the thread it came from.
+
+enum ReportReason {
+  IMPERSONATION
+  SEXUAL
+  VIOLENCE
+  PRETENDED_HUMAN
+  OTHER
+}
+
+model MessageReport {
+  id           String       @id @default(uuid())
+  userId       String
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // The message stays reportable after it's gone: SetNull keeps the report row
+  // (and its snapshot) when the thread is deleted from here or the account
+  // removes the character.
+  messageId    String?
+  message      ChatMessage? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  // §12.6 also covers what a character says in a room. Exactly one of
+  // messageId / groupMessageId is set; `reportedText` snapshots either.
+  groupMessageId String?
+  groupMessage   GroupMessage? @relation(fields: [groupMessageId], references: [id], onDelete: SetNull)
+  characterId  String?
+  character    Character?   @relation(fields: [characterId], references: [id], onDelete: SetNull)
+  reason       ReportReason
+  // the optional free-text note, capped at 2,000 chars by the controller
+  note         String?
+  // the message text as it read when it was reported
+  reportedText String
+  // set once a human has looked at it; the admin surface reads this
+  reviewedAt   DateTime?
+  createdAt    DateTime     @default(now())
+
+  // one person shouldn't file the same message twice, on either surface
+  @@unique([userId, messageId])
+  @@unique([userId, groupMessageId])
+  // the review queue: oldest unreviewed first
+  @@index([reviewedAt, createdAt])
+  @@index([characterId, createdAt])
+}
+
+// ─── memory (the inspector, brief §6.9 c.11 / §10.7) ──────────────────────────
+// "only what you've shared." A fact a character has learned about the user,
+// shown as a card the user can forget. Extracted locally for now
+// (lib/chat.js#extractFacts) - swap for the model's memory step later.
+model Memory {
+  id          String    @id @default(uuid())
+  characterId String
+  character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  // the fact text, already phrased back to the user ("you take the late local
+  // home most evenings.")
+  fact        String
+  // a lowercased key used only to dedupe near-identical facts on insert; never
+  // shown to the user.
+  factKey     String
+  // Which message taught this. "only what you've shared" has to cut both ways:
+  // editing or deleting the message that shared something takes the fact with
+  // it (controllers/chat.js#retractFrom). SetNull rather than Cascade so a fact
+  // whose message is gone for another reason is kept and simply loses its
+  // provenance; facts learned before this column existed have a null source and
+  // are only ever removed from the inspector.
+  sourceMessageId String?
+  sourceMessage   ChatMessage? @relation(fields: [sourceMessageId], references: [id], onDelete: SetNull)
+  // The same, for a fact learned in a room. Exactly one of the two is set - a
+  // fact has one origin - and they're separate columns because they point at
+  // different tables.
+  sourceGroupMessageId String?
+  sourceGroupMessage   GroupMessage? @relation(fields: [sourceGroupMessageId], references: [id], onDelete: SetNull)
+  // Memory tier (config/plans.js `memory`). SESSION facts are learned for the
+  // current sitting only and swept by lib/jobs.js. STORY facts live with the
+  // character. Pinned facts (Ultra) are never evicted by the per-character cap.
+  scope       MemoryScope @default(STORY)
+  pinned      Boolean   @default(false)
+  learnedAt   DateTime  @default(now())
+
+  @@unique([characterId, factKey])
+  @@index([scope, learnedAt])
+  @@index([characterId, learnedAt])
+  @@index([sourceMessageId])
+  @@index([sourceGroupMessageId])
+}
+
+// ─── group chat (brief §6.10) ─────────────────────────────────────────────────
+// "Bring several characters into one room. Set the scene. Step inside." A group
+// is one room owned by a user, holding 2–5 of their characters (ordered - "who
+// speaks first"), an optional shared history and scene, and the transcript.
+// Replies are generated one character at a time (chosen, or "let it flow") via
+// lib/chat.js#generateGroupReply, same Claude-or-stand-in path as 1:1 chat, and
+// they draw on the SAME per-character memory (the Memory table above).
+
+model Group {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // auto-generated ("Aria & Kabir") or user-set title (§6.10 resulting header)
+  name      String
+  // §6.10 step 3 - "do they know each other?" one line, optional
+  backstory String   @default("")
+  // §6.10 step 4 - "set the scene." 0–400 chars (§14.3 group scene description)
+  scene     String   @default("")
+  members   GroupMember[]
+  messages  GroupMessage[]
+  // Whose turn it is, as a seat `order`. Derived state, but stored: the speaker
+  // used to be inferred by scanning the transcript for the last character line,
+  // which meant two sends in flight together read the same "last speaker" and
+  // the same character answered both while the next seat was skipped. Advancing
+  // this inside the send transaction makes the rotation serialisable. It also
+  // survives a member being deleted, where the scan used to fall back to seat 0.
+  turnCursor Int     @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, updatedAt])
+}
+
+// A character's seat in a room. `order` is the "who speaks first" sequence
+// (§6.10 step 2) and the round-robin order when the room is left to "let it
+// flow".
+model GroupMember {
+  id          String    @id @default(uuid())
+  groupId     String
+  group       Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  characterId String
+  character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  order       Int       @default(0)
+
+  // ── per-group persona overrides (group details, §6.10) ────────────────────
+  // Edits made to a member from the group details screen land here, on the
+  // seat - never on the Character row. NULL means "inherit from the character",
+  // so an untouched seat still follows the original as it changes. A character
+  // has one GroupMember row per room, so renaming "Aria" in this group leaves
+  // Aria in every other room - and the global character - untouched.
+  //
+  // `tonesOverride` is Json rather than String[] so NULL (inherit) stays
+  // distinguishable from [] (deliberately cleared); Postgres array columns in
+  // Prisma can't be nullable.
+  nameOverride      String?
+  colourOverride    String?
+  quickLineOverride String?
+  tonesOverride     Json?
+
+  @@unique([groupId, characterId])
+  @@index([groupId, order])
+}
+
+model GroupMessage {
+  id        String        @id @default(uuid())
+  groupId   String
+  group     Group         @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  sender    MessageSender // USER or CHARACTER (reused enum)
+  // which character spoke (null for the user's own lines). Kept as a loose id
+  // plus a denormalized name/colour so the transcript still renders even if the
+  // character is later deleted - history shouldn't rearrange itself.
+  senderCharacterId String?
+  senderName        String?
+  senderColour      String?
+  text      String
+  // in-room image generation (mirrors ChatMessage): a character line can carry
+  // a generated picture (`imageUrl`) and its soft caption (`imageAlt`). Both
+  // null on ordinary lines, so existing rows are unaffected.
+  imageUrl  String?
+  imageAlt  String?
+  // Photos / files the USER shared with this line - the same
+  // { id, kind, name, type, size, url } array lib/attachments.js builds for
+  // 1:1 chat. Null on ordinary lines and on character replies.
+  attachments Json?
+  blocked   Boolean       @default(false)
+  // Which classifier reason stopped a blocked line (mirrors ChatMessage), so
+  // re-opening the §12.2 pause shows the real reason rather than guessing.
+  blockedReason String?
+  // billing audit (mirrors ChatMessage)
+  isPremium   Boolean       @default(false)
+  modelId     String?
+  creditCost  Decimal?      @db.Decimal(10, 2)
+  personaId   String?
+  // Denormalized owner, for exactly the reason ChatMessage carries one: the
+  // Free daily allowance is "Chat - 30 / day" across BOTH surfaces, and that
+  // has to be one indexed count with no join. Without this column group
+  // messages were uncountable, and so went uncounted entirely.
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime      @default(now())
+
+  // §12.6 - reports filed on a line said in a room.
+  reports   MessageReport[]
+  // c.11 - facts this line taught, so deleting it can retract them.
+  taughtFacts Memory[]
+
+  @@index([groupId, createdAt])
+  // the shape the shared daily count uses
+  @@index([userId, sender, createdAt])
+}
+
+// ─── journal ─────────────────────────────────────────────────────────────────
+// "write to or about people who matter to you." (brief §6.11–6.13). A thread is
+// a collection of entries about one person, topic, or question. Entries hold the
+// user's writing plus an optional AI reflection - the AI reflects what was
+// written, gently, and never impersonates (brief §1, §6.13).
+
+model JournalThread {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // "- who or what is it about?" (brief §6.12) - 1–80 chars, like an entry title
+  name            String
+  // "- is it about a real person?" toggle (brief §6.12). Purely a UI note that
+  // Privateaile reflects, never impersonates - it doesn't change how entries are read.
+  aboutRealPerson Boolean  @default(false)
+  // sage-gradient avatar/icon on the thread card (brief §6.11)
+  colour          String   @default("#a8b08c")
+  entries         JournalEntry[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId, updatedAt])
+}
+
+model JournalEntry {
+  id         String        @id @default(uuid())
+  threadId   String
+  thread     JournalThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  // entry title - optional, 0–80 chars (brief §14.3: journal entry title 1–80)
+  title      String        @default("")
+  // the writing itself
+  body       String        @default("")
+  // "a quiet AI reflection appears as the user pauses" (brief §6.13). Null until
+  // one is generated; regenerated on "[ask for another]".
+  reflection String?
+  // Photos / documents attached to the entry (plan-gated, quota-metered).
+  attachments JournalAttachment[]
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  @@index([threadId, createdAt])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// BILLING, CREDITS, USAGE  (Phase 2 - see config/plans.js for every number)
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum MemoryScope {
+  SESSION
+  STORY
+  LONG_TERM
+}
+
+enum BillingCycle {
+  MONTHLY
+  ANNUAL
+}
+
+enum SubscriptionStatus {
+  // row created, checkout not completed yet (no entitlement)
+  INCOMPLETE
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+  PAUSED
+}
+
+enum PaymentProvider {
+  RAZORPAY
+}
+
+enum MandateStatus {
+  NONE
+  PENDING
+  ACTIVE
+  REVOKED
+}
+
+enum PaymentMethodType {
+  NONE
+  CARD
+  UPI
+  NETBANKING
+  WALLET
+  OTHER
+}
+
+// One row per user, ever - the current/last subscription. History of plan
+// moves lives in PlanChange, money in Payment.
+model Subscription {
+  id                     String             @id @default(uuid())
+  userId                 String             @unique
+  user                   User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan                   Plan
+  cycle                  BillingCycle
+  status                 SubscriptionStatus
+  provider               PaymentProvider    @default(RAZORPAY)
+  providerSubscriptionId String?            @unique
+  // an upgrade creates a replacement subscription at the provider, which
+  // takes over `providerSubscriptionId` once its first charge is confirmed
+  pendingProviderSubscriptionId String?     @unique
+  providerPlanId         String?
+  providerCustomerId     String?
+  mandateStatus          MandateStatus      @default(NONE)
+  paymentMethodType      PaymentMethodType  @default(NONE)
+  paymentMethodLast4     String?
+  // trial window (only set when the subscription was started as a trial)
+  trialStartsAt          DateTime?
+  trialEndsAt            DateTime?
+  // paid period the user currently has access for
+  currentPeriodStart     DateTime?
+  currentPeriodEnd       DateTime?
+  cancelAtPeriodEnd      Boolean            @default(false)
+  cancelledAt            DateTime?
+  endedAt                DateTime?
+  // PAST_DUE: access is kept until this instant, then the sweep downgrades
+  graceUntil             DateTime?
+  trialReminder12SentAt  DateTime?
+  trialReminder14SentAt  DateTime?
+  renewalFailedCount     Int                @default(0)
+  // the plan a user asked to move to at the next renewal (downgrade path)
+  pendingPlan            Plan?
+  pendingCycle           BillingCycle?
+  payments               Payment[]
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  @@index([status, currentPeriodEnd])
+  @@index([status, trialEndsAt])
+  @@index([status, graceUntil])
+}
+
+enum PaymentKind {
+  SUBSCRIPTION
+  RENEWAL
+  CREDIT_PACK
+  TRIAL_AUTH
+}
+
+enum PaymentStatus {
+  CREATED
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+// Financial record. `userId` is nullable and SetNull so the row survives the
+// account's deletion (lib/jobs.js#sweepDeletions) - money history is kept.
+model Payment {
+  id                 String          @id @default(uuid())
+  userId             String?
+  user               User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  subscriptionId     String?
+  subscription       Subscription?   @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  kind               PaymentKind
+  provider           PaymentProvider @default(RAZORPAY)
+  providerOrderId    String?         @unique
+  providerPaymentId  String?         @unique
+  providerInvoiceId  String?
+  providerRefundId   String?
+  amountPaise        Int
+  currency           String          @default("INR")
+  status             PaymentStatus   @default(CREATED)
+  failureCode        String?
+  failureReason      String?
+  // credit packs
+  packId             String?
+  creditsGranted     Decimal?        @db.Decimal(10, 2)
+  refundedPaise      Int             @default(0)
+  // subscription payments: which plan/cycle this charge is for (verified
+  // against the provider payload before anything is activated)
+  plan               Plan?
+  cycle              BillingCycle?
+  // client-supplied Idempotency-Key for the create call, so a retried POST
+  // returns the same order instead of opening another one
+  idempotencyKey     String?         @unique
+  rawPayload         Json?
+  creditTransactions CreditTransaction[]
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([subscriptionId, createdAt])
+}
+
+enum WebhookStatus {
+  PENDING
+  PROCESSED
+  FAILED
+  IGNORED
+}
+
+// Every provider webhook, keyed by the provider's own event id, so a redelivery
+// is recognised before any handler runs.
+model WebhookEvent {
+  id          String          @id @default(uuid())
+  provider    PaymentProvider @default(RAZORPAY)
+  eventId     String          @unique
+  eventType   String
+  payload     Json
+  status      WebhookStatus   @default(PENDING)
+  error       String?
+  attempts    Int             @default(0)
+  receivedAt  DateTime        @default(now())
+  processedAt DateTime?
+
+  @@index([status, receivedAt])
+}
+
+enum PlanChangeReason {
+  TRIAL_START
+  TRIAL_CONVERT
+  TRIAL_CANCEL
+  UPGRADE
+  DOWNGRADE
+  RENEWAL
+  EXPIRE
+  PAYMENT_FAILED
+  ADMIN
+  RESUME
+}
+
+// Audit trail of every effective-plan move (who/why), written by
+// lib/billing/subscription.js#applyEffectivePlan only.
+model PlanChange {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fromPlan  Plan
+  toPlan    Plan
+  reason    PlanChangeReason
+  // an admin id for ADMIN changes, null for system/webhook moves
+  actorId   String?
+  note      String?
+  createdAt DateTime         @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// ─── credits ──────────────────────────────────────────────────────────────────
+// Purchased credits (never expire) live on the wallet. Monthly plan credits
+// live as expiring grants. The ledger (CreditTransaction) is append-only and
+// every row carries the balance after it, so the two can be reconciled.
+
+model CreditWallet {
+  id               String   @id @default(uuid())
+  userId           String   @unique
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purchasedBalance Decimal  @default(0) @db.Decimal(10, 2)
+  updatedAt        DateTime @updatedAt
+}
+
+enum CreditGrantSource {
+  PLAN_MONTHLY
+  ADMIN
+  PROMO
+  TRIAL
+}
+
+model CreditGrant {
+  id        String            @id @default(uuid())
+  userId    String
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  source    CreditGrantSource
+  amount    Decimal           @db.Decimal(10, 2)
+  remaining Decimal           @db.Decimal(10, 2)
+  // billing period this grant was issued for, e.g. "2026-09-15" (period start)
+  periodKey String
+  grantedAt DateTime          @default(now())
+  expiresAt DateTime
+  // set by the expiry sweep once `remaining` has been written off
+  expiredAt DateTime?
+
+  @@unique([userId, source, periodKey])
+  @@index([userId, expiresAt])
+}
+
+enum CreditTxType {
+  GRANT
+  PURCHASE
+  SPEND
+  REFUND
+  EXPIRE
+  ADJUST
+}
+
+enum CreditFeature {
+  PREMIUM_REPLY
+  IMAGE
+  HD_IMAGE
+  REFERENCE_EDIT
+  PREMIUM_VOICE
+  MODEL_CALL
+  PACK
+  PLAN
+  ADMIN
+  EXPIRY
+}
+
+model CreditTransaction {
+  id             String        @id @default(uuid())
+  userId         String?
+  user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  type           CreditTxType
+  // signed: negative for SPEND/EXPIRE, positive for GRANT/PURCHASE/REFUND
+  amount         Decimal       @db.Decimal(10, 2)
+  feature        CreditFeature
+  modelId        String?
+  refType        String?
+  refId          String?
+  idempotencyKey String        @unique
+  // total balance (grants remaining + purchased) after this row
+  balanceAfter   Decimal       @db.Decimal(10, 2)
+  // how the amount was split: [{ grantId|"purchased", amount }]
+  breakdown      Json?
+  paymentId      String?
+  payment        Payment?      @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  actorId        String?
+  note           String?
+  createdAt      DateTime      @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// ─── usage ────────────────────────────────────────────────────────────────────
+// One row per (user, metric, period). Incremented with a single atomic upsert
+// whose WHERE clause carries the limit, so two concurrent requests can never
+// both slip under it (lib/usage.js).
+
+enum UsageMetric {
+  MESSAGES
+  PREMIUM_REPLIES
+  IMAGES
+  HD_IMAGES
+  VOICE_SECONDS
+  SPOKEN_REPLIES
+  NEW_CHARACTERS
+  PERSONA_CHANGES
+  GROUPS_CREATED
+  DOCUMENT_UPLOADS
+  ASK_MESSAGES
+}
+
+model UsageCounter {
+  id        String      @id @default(uuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  metric    UsageMetric
+  // "D:2026-09-15" (IST day), "M:2026-09-15" (billing period start), "LIFETIME"
+  periodKey String
+  used      Int         @default(0)
+  updatedAt DateTime    @updatedAt
+
+  @@unique([userId, metric, periodKey])
+  @@index([updatedAt])
+}
+
+model UsageEvent {
+  id        String      @id @default(uuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  metric    UsageMetric
+  delta     Int
+  feature   String?
+  refId     String?
+  createdAt DateTime    @default(now())
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+}
+
+// ─── personas ─────────────────────────────────────────────────────────────────
+// Who the USER is speaking as (distinct from GroupMember overrides, which are
+// per-room edits to a character). One is active at a time.
+
+model Persona {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  description String   @default("")
+  isActive    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId, updatedAt])
+}
+
+// ─── user long-term memory (Plus/Ultra) ───────────────────────────────────────
+// Facts about the user that follow them across every character. Pinned facts
+// (Ultra) are always primed into the prompt and never evicted.
+model UserMemory {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fact      String
+  factKey   String
+  pinned    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, factKey])
+  @@index([userId, pinned, createdAt])
+}
+
+// ─── multiple stories per character (Plus/Ultra) ──────────────────────────────
+model Story {
+  id          String    @id @default(uuid())
+  characterId String
+  character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  title       String
+  messages    ChatMessage[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([characterId, updatedAt])
+}
+
+// ─── style profiles (Plus: 5, Ultra: unlimited) ───────────────────────────────
+model StyleProfile {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  // the learned style notes the prompt is seeded with
+  notes     String   @default("")
+  // sample lines the user provided
+  samples   Json?
+  isActive  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, updatedAt])
+}
+
+// ─── journal attachments (Basic: photos, Plus/Ultra: photos + documents) ──────
+enum JournalAttachmentKind {
+  PHOTO
+  DOCUMENT
+}
+
+model JournalAttachment {
+  id         String                @id @default(uuid())
+  entryId    String
+  entry      JournalEntry          @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  // denormalized owner so the storage quota is one indexed SUM
+  userId     String
+  user       User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind       JournalAttachmentKind
+  name       String
+  type       String
+  size       Int
+  storedPath String
+  createdAt  DateTime              @default(now())
+
+  @@index([entryId])
+  @@index([userId])
+}

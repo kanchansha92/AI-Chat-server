@@ -1,0 +1,16 @@
+{
+  "llm": {
+    "provider": "openai",
+    "model": "openai/gpt-oss-120b",
+    "baseUrl": "https://api.groq.com/openai/v1",
+    "timeoutMs": 20000,
+    "fallbackOrder": [
+      "openai",
+      "local-standin"
+    ],
+    "applied": false
+  },
+  "moderation": {
+    "useModel": true
+  }
+}

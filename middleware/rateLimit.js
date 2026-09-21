@@ -39,15 +39,18 @@ const authLimiter = rateLimit({
 const perUserKey = (req) =>
   (req.user?.userId ? `u:${req.user.userId}` : `ip:${ipKeyGenerator(req.ip)}`);
 
-/** A per-USER limiter. Mount AFTER authMiddleware so req.user is populated. */
-function perUserLimiter({ windowMs, limit }) {
+/**
+ * A per-USER limiter. Mount AFTER authMiddleware so req.user is populated.
+ * `message` optionally replaces the default 429 body (same { error } shape).
+ */
+function perUserLimiter({ windowMs, limit, message }) {
   return rateLimit({
     windowMs,
     limit,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: perUserKey,
-    message: { error: { message: serverCopy.rateLimited } },
+    message: message || { error: { message: serverCopy.rateLimited } },
   });
 }
 

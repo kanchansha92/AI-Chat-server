@@ -52,6 +52,25 @@ function assertEnvIsSafe() {
     }
   }
 
+  // Voice is optional, so a gap here never stops the server: every voice route
+  // then answers 503 VOICE_UNAVAILABLE with the same reason. But a
+  // half-configured voice (a key without a provider, a provider without a key,
+  // an unsupported provider) is almost always a mistake, so say so at boot.
+  // Only the NAME of the missing setting is printed, never a value.
+  const voiceVars = Object.keys(process.env).filter((k) => k.startsWith('VOICE_'));
+  if (voiceVars.length > 0) {
+    // eslint-disable-next-line global-require
+    const voice = require('../lib/voice');
+    const problem = voice.configProblem();
+    if (problem) {
+      console.warn(`[voice] disabled - ${problem}. Voice routes will answer 503 VOICE_UNAVAILABLE.`);
+    } else if (!voice.isPremiumConfigured()) {
+      console.log('[voice] enabled (premium voice off - VOICE_TTS_PREMIUM_MODEL is not set).');
+    } else {
+      console.log('[voice] enabled (premium voice on).');
+    }
+  }
+
   if (problems.length > 0) {
     console.error(
       'Refusing to start - insecure configuration:\n' + problems.map((p) => `  - ${p}`).join('\n')

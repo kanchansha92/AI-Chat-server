@@ -124,6 +124,7 @@ model User {
   userMemories   UserMemory[]
   styleProfiles  StyleProfile[]
   journalAttachments JournalAttachment[]
+  voiceClips     VoiceClip[]
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 }
@@ -932,4 +933,71 @@ model JournalAttachment {
 
   @@index([entryId])
   @@index([userId])
+}
+
+// ─── voice: cached spoken replies (lib/voiceClips.js) ─────────────────────────
+// One row per (message, variant): the audio generated for a character reply,
+// kept on disk under uploads/voice and replayed without another provider call
+// or another charge. The row is also the lock and the idempotency record for
+// generating it: a request "claims" the row (status PENDING + a lease) before
+// any allowance or credit is taken, so two concurrent requests for the same
+// reply can never both generate or both charge. `attempt` numbers each
+// generation, and the premium-voice credit key is `voice:<id>:<attempt>`, so a
+// retry of a failed (refunded) attempt is a new, separately-charged attempt,
+// and a retry of a successful one is a cache hit that charges nothing.
+//
+// `messageId` is deliberately not a foreign key: it points at either a
+// ChatMessage or a GroupMessage (`messageKind`). Ownership is re-checked
+// against the message on every request, and lib/jobs.js sweeps rows whose
+// audio has not been played for a while.
+enum VoiceMessageKind {
+  CHAT
+  GROUP
+}
+
+enum VoiceClipStatus {
+  PENDING
+  READY
+  FAILED
+}
+
+model VoiceClip {
+  id               String           @id @default(uuid())
+  userId           String
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messageKind      VoiceMessageKind
+  messageId        String
+  // "standard:alloy:mp3" / "premium:alloy:mp3" - one cached clip per variant
+  variant          String
+  premium          Boolean          @default(false)
+  status           VoiceClipStatus  @default(PENDING)
+  attempt          Int              @default(0)
+  // sha256 of the text the audio was made from. A reply whose text has since
+  // changed (edited / regenerated) is spoken again rather than replayed stale.
+  textHash         String?
+  storedPath       String?
+  mimeType         String?
+  bytes            Int?
+  seconds          Int?
+  model            String?
+  // the credit this clip was paid with (premium voice), for audit
+  creditKey        String?
+  // an in-flight generation's lease and what it has reserved, so a request
+  // that died mid-flight can be settled (allowance released, credit refunded)
+  // by the next claimer or by the jobs sweep instead of leaking
+  lockedUntil      DateTime?
+  pendingSeconds   Int?
+  pendingPeriodKey String?
+  pendingCreditKey String?
+  // did this attempt reserve allowance at all (false for a free re-render of
+  // audio we lost from disk)
+  pendingMetered   Boolean          @default(false)
+  lastUsedAt       DateTime         @default(now())
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@unique([messageKind, messageId, variant])
+  @@index([userId])
+  @@index([status, lockedUntil])
+  @@index([lastUsedAt])
 }

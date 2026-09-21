@@ -20,7 +20,7 @@ const DELETION_GRACE_DAYS = 30;
 // §12.7 - how long an emailed export download link stays valid.
 const EXPORT_TTL = '7d';
 
-const PLACEHOLDER_EMAIL_SUFFIX = '@no-email.ember.local';
+const PLACEHOLDER_EMAIL_SUFFIX = '@no-email.privateaile.local';
 function isRealEmail(email) {
   return typeof email === 'string' && email.includes('@') && !email.endsWith(PLACEHOLDER_EMAIL_SUFFIX);
 }

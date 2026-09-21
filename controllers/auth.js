@@ -4,7 +4,17 @@ const prisma = require('../lib/prisma');
 const { authCopy, serverCopy } = require('../lib/copy');
 const { validateRegister, validateLoginShape, validateResetPassword } = require('../lib/validation');
 const { isLockedOut, recordFailedAttempt, clearAttempts } = require('../lib/loginAttempts');
-const { sendPasswordResetEmail } = require('../lib/email');
+const { sendPasswordResetEmail, sendWelcomeEmail } = require('../lib/email');
+
+// Welcome mail (brief §8.1) - fire-and-forget, never blocks or fails signup.
+// Skips the placeholder addresses social sign-in mints when a provider withholds
+// the real email.
+function sendWelcome(user) {
+  if (!user || !user.email || user.email.endsWith('@no-email.privateaile.local')) return;
+  Promise.resolve(sendWelcomeEmail({ to: user.email, name: user.name })).catch((e) =>
+    console.error('[auth:welcome]', e && e.message ? e.message : e)
+  );
+}
 
 // Password rules for the reset flow live in lib/validation.js#validateResetPassword,
 // the same validator the register flow uses - no second copy of the bar here.
@@ -108,6 +118,8 @@ async function register(req, res) {
         dob: dobDate,
       },
     });
+
+    sendWelcome(user);
 
     const token = signToken(user);
 
@@ -253,14 +265,16 @@ async function findOrCreateSocialUser(provider, { providerId, email, name }) {
   //    provider withheld an email (Facebook can, when the user declines the
   //    scope) we still need a unique, non-null value for the column, so fall
   //    back to a stable provider-scoped placeholder the user can change later.
-  const emailForRow = normalizedEmail || `${provider}_${providerId}@no-email.ember.local`;
-  return prisma.user.create({
+  const emailForRow = normalizedEmail || `${provider}_${providerId}@no-email.privateaile.local`;
+  const created = await prisma.user.create({
     data: {
       name: (name && name.trim()) || 'friend',
       email: emailForRow,
       [idField]: providerId,
     },
   });
+  sendWelcome(created);
+  return created;
 }
 
 /**

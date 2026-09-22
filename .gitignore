@@ -1,3 +1,7 @@
 node_modules/
 uploads/
 .env
+*.dump
+env.new.txt
+.env
+uploads/

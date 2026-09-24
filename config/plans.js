@@ -79,7 +79,7 @@ const BASIC = {
   id: 'BASIC',
   name: 'Basic',
   tagline: 'for daily conversations',
-  price: { monthly: 899, annual: 8999 },
+  price: { monthly: 799, annual: 7999 },
   messagesPerDay: null,
   premiumRepliesPerDay: 5,
   autoPremium: false,
